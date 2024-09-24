@@ -1,8 +1,10 @@
 #!/usr/bin/python3
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
+import traceback
+import signal
 
 input_pipe_path: str = "/tmp/temp_info_pipe"
 output_pipe_path: str = "/tmp/response_pipe"
@@ -10,30 +12,60 @@ output_pipe_path: str = "/tmp/response_pipe"
 info_line_terminator: str = chr(0)  # NULL character, /x00
 info_line_delimiter: str = ';'
 
-setpoint_value: float = 10.0
-setpoint_upper_threshold: float = 15.0
-setpoint_lower_threshold: float = 5.0
+setpoint_value: float = 0.0
+setpoint_upper_threshold: float = 1.0
+setpoint_lower_threshold: float = -1.0
+
+p_tuning: float = 0.8
+i_tuning: float = 0.2
+d_tuning: float = 0.2
+
+freq: float = 5.0  # Hz
+dt: float = 1.0 / freq
 
 
 @dataclass
 class Thermistor:
     sensor_value: float
-    heater_state: bool
 
     def __str__(self):
-        return "Temp: {}, State: {}".format(self.sensor_value,
-                                            "on" if self.heater_state else "off")
+        return f"Temp: {self.sensor_value}"
 
 
-def set_heater_values(h1: int, h2: int, h3: int, h4: int) -> str:
+@dataclass()
+class PidController:
+    integral: float = field(init=False, default=0.0)
+    previous_error: float = field(init=False, default=0.0)
+
+    p_tuning: float = 1.0
+    i_tuning: float = 1.0
+    d_tuning: float = 1.0
+
+    def calc_output(self, measured_value: float, setpoint: float, dt: float) -> float:
+        error_factor: float = setpoint - measured_value
+        p_factor: float = error_factor
+        self.integral = self.integral + error_factor * dt
+        d_factor: float = (error_factor - self.previous_error) / dt
+
+        result: float = (self.p_tuning * p_factor +
+                         self.i_tuning * self.integral +
+                         self.d_tuning * d_factor)
+        self.previous_error = error_factor
+        return result
+
+
+def heater_values_str(h1: int, h2: int, h3: int, h4: int) -> str:
     return "{};{};{};{}\0".format(h1, h2, h3, h4)
 
 
 def write_to_output_pipe(heater_values: List[int], verbose: bool = False):
     with open(output_pipe_path, 'w') as pipe:
-        data = set_heater_values(heater_values[0], heater_values[1], heater_values[2], heater_values[3])
+        data = heater_values_str(heater_values[0],
+                                 heater_values[1],
+                                 heater_values[2],
+                                 heater_values[3])
         if verbose:
-            print(f" Writing {data_to_write}")
+            print(f" Writing {data}")
         pipe.write(data)
 
 
@@ -42,7 +74,7 @@ def bang_bang(in_thermister: List[Thermistor], setpoint: float,
     result: List[int] = [0, 0, 0, 0]
 
     for i, t in enumerate(in_thermister):
-        if t.sensor_value < lower_threshold:
+        if t.sensor_value < lower_threshold or t.sensor_value < upper_threshold:
             result[i] = 1
         elif t.sensor_value > upper_threshold:
             result[i] = 0
@@ -50,30 +82,16 @@ def bang_bang(in_thermister: List[Thermistor], setpoint: float,
     return result
 
 
-def pid(in_thermister: List[Thermistor], setpoint: float,
-        upper_threshold: float, lower_threshold: float, dt: float) -> List[int]:
-    #TODO: implement PID controller, possibly using a class to keep track of historic values
-    # like previous error, and integral
-    # https://en.wikipedia.org/wiki/Proportional%E2%80%93integral%E2%80%93derivative_controller#Pseudocode
-
-    result: List[int] = [0, 0, 0, 0]
-
-    for i, t in enumerate(in_thermister):
-        p_factor: float = 0.0
-        i_factor: float = 0.0
-        d_factor: float = 0.0
-
-        error_factor: float = setpoint - t.sensor_value
-
-        result[i] = int(p_factor + i_factor + d_factor)
-        pass
-
-    return result
-
-
 def main():
     print(f"Opening {input_pipe_path}... ", end="")
     sys.stdout.flush()
+
+    pid_controllers: List[PidController] = [
+        PidController(p_tuning, i_tuning, d_tuning),
+        PidController(p_tuning, i_tuning, d_tuning),
+        PidController(p_tuning, i_tuning, d_tuning),
+        PidController(p_tuning, i_tuning, d_tuning)
+    ]
 
     clock: int = 0
     with open(input_pipe_path, 'r') as input_pipe:
@@ -89,41 +107,53 @@ def main():
             # read from the input stream until info line break (at info_line_terminator)
             if input_data[0] == info_line_terminator:
 
-                # print(f'{clock} Read: "{input_info_line}"', flush=True)
+                # print(f"{clock} Read: {input_info_line}", flush=True)
 
                 parts: List[str] = input_info_line.split(info_line_delimiter)
                 if len(parts) != 5:
                     continue
                 # parts format:
-                # <clock_timestamp>;<t1_temp>-<t1_heater_state>;<t2_temp>-<t2_heater_state>;<t3_temp>-<t3_heater_state>;<t4_temp>-<t4_heater_state><\0>
-                # note: line ends with NULL \0 character, and thermistor temperatures and heater states are dash separated
+                # <clock_timestamp>;<therm1_sensor_temp>-<therm1_temp_diff>;...\0
+                # notes:
+                # line ends with NULL \0 character
+                # thermistor sensor value and previous sensor value are also dash-separated,
+                #  which means parsing the numbers is going to be a doozy
+                #  e.g. "-10.00000--25" would be -10.0 current sensor value and -25 temp difference
                 timestamp, t1, t2, t3, t4 = parts
 
                 read_therm_values: List[str] = [t1, t2, t3, t4]
                 thermistors: List[Thermistor] = []
 
+                print("received raw >", input_info_line)
+
                 # split each thermistor values, and append to thermistors list
                 for t in read_therm_values:
-                    idx_sep: int = t.rfind('-')
-
+                    idx_sep: int = t.find('-')
                     temp_str: str = t[:idx_sep]
+
+                    if idx_sep == 0:
+                        # temp is a negative value because it's prefixed with minus sign
+                        next_dash_idx = t.find('-', 1)
+                        temp_str = t[:next_dash_idx]
+
                     temp: float = float(temp_str)
-
-                    # convert str to int, then int to bool
-                    state_str: str = t[idx_sep:]
-                    state_int: int = int(state_str)
-                    state: bool = bool(state_int)
-
-                    thermistors.append(Thermistor(temp, state))
+                    thermistors.append(Thermistor(temp))
 
                 print(f"timestamp: {timestamp}")
                 for i, t in enumerate(thermistors):
                     print("\t", i + 1, t)
                 print()
 
-                values: List[int] = bang_bang(thermistors, setpoint_value, setpoint_upper_threshold,
-                                              setpoint_lower_threshold)
-                write_to_output_pipe(values)
+                values: List[int] = [0, 0, 0, 0]
+
+                use_bang_bang: bool = True
+                if use_bang_bang:
+                    values = bang_bang(thermistors, setpoint_value, setpoint_upper_threshold,
+                                       setpoint_lower_threshold)
+                else:
+                    # use pids
+                    values = pids(pid_controllers, thermistors)
+                write_to_output_pipe(values, verbose=True)
 
                 input_info_line = ""  # clear info line
                 clock += 1
@@ -131,12 +161,28 @@ def main():
                 input_info_line += input_data
 
 
+def pids(pid_controllers, thermistors) -> List[int]:
+    result: List[int] = []
+    for therm, pid in zip(thermistors, pid_controllers):
+        pid_out = pid.calc_output(therm.sensor_value, setpoint_value, dt)
+        result.append(int(pid_out))
+    return result
+
+
+def handler(signum: int, frame):
+    print("Pressed Ctrl-C. Setting all heaters to 0 before exiting")
+    write_to_output_pipe([0, 0, 0, 0])
+    exit()
+
+
 if __name__ == '__main__':
+    signal.signal(signal.SIGINT, handler)
     try:
         main()
-    except:
-        # fallback, to when the process is interrupted via Ctrl-C
+    except Exception as e:
+        traceback.print_tb(e.__traceback__)
+        print(e)
+        # fallback when an unhandled exception is thrown
         # set all heater values to zero
-        with open(output_pipe_path, 'w') as output_pipe:
-            data_to_write = set_heater_values(0, 0, 0, 0)
-            output_pipe.write(data_to_write)
+        write_to_output_pipe([0, 0, 0, 0])
+        exit()
