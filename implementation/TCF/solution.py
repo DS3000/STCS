@@ -1,14 +1,14 @@
 #!/usr/bin/python3
-
-import sys
-from dataclasses import dataclass, field
-from pickle import Pickler
 from typing import List
 import traceback
 import signal
 import threading
-from time import sleep
 import os
+
+from Thermistor import Thermistor
+from Controller import Controller
+from BangBangController import BangBangController
+from PIDController import PIDController
 
 INPUT_PIPE_PATH: str = "/tmp/temp_info_pipe"
 OUTPUT_PIPE_PATH: str = "/tmp/response_pipe"
@@ -18,88 +18,27 @@ INFO_LINE_DELIMITER: str = ';'  # delimiter between values in a line
 
 SETPOINT_MAX_VALUE: float = 20.0
 SETPOINT_MIN_VALUE: float = -20.0
-setpoint_value: float = 0.0
-frequency: float = 5.0  # Hz
+INITIAL_SETPOINT_VALUE: float = 0.0
+INITIAL_FREQUENCY: float = 5.0  # Hz
 
-thermistors_setpoints: List[float] = [0.0, 0.0, 0.0, 0.0]
+INITIAL_PID_KP: float = 0.0
+INITIAL_PID_KI: float = 0.0
+INITIAL_PID_KD: float = 0.0
 
-pid_Kp: float = 0.0
-pid_Ki: float = 0.0
-pid_Kd: float = 0.0
-
-controller_enabled: bool = False
+controllers_enabled: bool = False
 lock: threading.Lock = threading.Lock()
 
+controllers: List[BangBangController | PIDController] = [
+    BangBangController(INITIAL_SETPOINT_VALUE),
+    BangBangController(INITIAL_SETPOINT_VALUE),
+    BangBangController(INITIAL_SETPOINT_VALUE),
+    BangBangController(INITIAL_SETPOINT_VALUE),
 
-@dataclass()
-class Controller:
-    setpoint: float = 0.0
-
-    def process(self, measured_value: float) -> float:
-        pass
-
-
-@dataclass()
-class BangBang(Controller):
-    def process(self, measured_value: float) -> float:
-        if measured_value > self.setpoint:
-            return 0.0
-        return 1.0
-
-
-@dataclass()
-class PID(Controller):
-    Kp: float = 0.0
-    Ki: float = 0.0
-    Kd: float = 0.0
-    freq: float = 5.0  # Hz
-
-    integral: float = field(init=False, default=0.0)
-    previous_error: float = field(init=False, default=0.0)
-
-    def process(self, measured_value: float) -> float:
-        dt: float = 1.0 / self.freq
-
-        error_factor: float = self.setpoint - measured_value
-        p_factor: float = error_factor
-        self.integral = self.integral + error_factor * dt
-        d_factor: float = (error_factor - self.previous_error) / dt
-
-        result: float = (self.Kp * p_factor +
-                         self.Ki * self.integral +
-                         self.Kd * d_factor)
-        self.previous_error = error_factor
-        return result
-
-
-@dataclass
-class Thermistor:
-    sensor_value: float
-
-    def __str__(self):
-        return f"Temp: {self.sensor_value}"
-
-
-@dataclass()
-class PidController:
-    integral: float = field(init=False, default=0.0)
-    previous_error: float = field(init=False, default=0.0)
-
-    p_tuning: float = 1.0
-    i_tuning: float = 1.0
-    d_tuning: float = 1.0
-
-    def calc_output(self, measured_value: float, setpoint: float, dt: float) -> float:
-        error_factor: float = setpoint - measured_value
-        p_factor: float = error_factor
-        self.integral = self.integral + error_factor * dt
-        d_factor: float = (error_factor - self.previous_error) / dt
-
-        result: float = (self.p_tuning * p_factor +
-                         self.i_tuning * self.integral +
-                         self.d_tuning * d_factor)
-        self.previous_error = error_factor
-        return result
+    # PIDController(INITIAL_SETPOINT_VALUE, INITIAL_PID_KP, INITIAL_PID_KI, INITIAL_PID_KD, INITIAL_FREQUENCY),
+    # PIDController(INITIAL_SETPOINT_VALUE, INITIAL_PID_KP, INITIAL_PID_KI, INITIAL_PID_KD, INITIAL_FREQUENCY),
+    # PIDController(INITIAL_SETPOINT_VALUE, INITIAL_PID_KP, INITIAL_PID_KI, INITIAL_PID_KD, INITIAL_FREQUENCY),
+    # PIDController(INITIAL_SETPOINT_VALUE, INITIAL_PID_KP, INITIAL_PID_KI, INITIAL_PID_KD, INITIAL_FREQUENCY),
+]
 
 
 def clear_console():
@@ -124,31 +63,21 @@ def turn_off_heaters():
     write_to_output_pipe([0, 0, 0, 0])
 
 
-def bang_bang(in_thermister: List[Thermistor], setpoint: float) -> List[int]:
-    result: List[int] = [0, 0, 0, 0]
-
-    for i, t in enumerate(in_thermister):
-        result[i] = 0
-        if t.sensor_value < setpoint:
-            result[i] = 1
-
-    return result
-
-
 def toggle_controller_menu():
-    global controller_enabled
+    global controllers_enabled
     with lock:
-        controller_enabled = not controller_enabled
-        if not controller_enabled:
+        controllers_enabled = not controllers_enabled
+        if not controllers_enabled:
             turn_off_heaters()
 
 
-def set_pid_ks(kp: float, ki: float, kd: float, controllers: List[PidController]):
-    with lock:
-        for controller in controllers:
-            controller.p_tuning = kp
-            controller.i_tuning = ki
-            controller.d_tuning = kd
+def set_pid_ks(kp: float, ki: float, kd: float):
+    global controllers
+
+    for controller in controllers:
+        controller.Kp = kp
+        controller.Ki = ki
+        controller.Kd = kd
 
 
 def adjust_pid_ks_menu():
@@ -179,30 +108,47 @@ def adjust_pid_ks_menu():
             input(f"Could not parse entered line as 3 floats")
             continue
 
-        set_pid_ks(kp, ki, kd)
+        with lock:
+            set_pid_ks(kp, ki, kd)
         break
 
 
 def adjust_thermistors_setpoint_menu():
+    # TODO implement all options. check the diagram
     msg: str = \
         "1- Adjust setpoint for all heaters\n" \
         "2- Adjust setpoint for specific heater\n" \
         "3- go back\n"
 
-    opt: str = prompt_user_until_valid_input(msg, ["1", "2", "3"])
-    match opt:
-        case "1":
-            val_str: str = input("Adjust setpoint for all heaters to value:")
-            val_num: int = int(val_str)
+    while True:
+        clear_console()
+        opt: str = prompt_user_until_valid_input(msg, ["1", "2", "3"])
+        match opt:
+            case "1":
+                val_str: str = input("Adjust setpoint for all heaters to value\n>")
+                try:
+                    val_num: float = float(val_str)
+                except ValueError:
+                    input(f"Failed to convert {val_str} to float")
+                    continue
 
-        case "2":
-            pass
-        case "3":
-            pass
+                if not (SETPOINT_MIN_VALUE <= val_num <= SETPOINT_MAX_VALUE):
+                    input(f"Setpoint must be between {SETPOINT_MIN_VALUE} and {SETPOINT_MAX_VALUE}")
+                    continue
+
+                for controller in controllers:
+                    controller.setpoint = val_num
+
+            case "2":
+                val_str: str = input("Enter a space-separated line (<controller> <setpoint>)\n>")
+
+            case "3":
+                pass
+
+        break
 
 
 def adjust_controller_frequency_menu():
-    global frequency
     msg: str = "Enter the new controller frequency (in Hz), or empty string to go back"
 
     freq: int = 0
@@ -221,8 +167,10 @@ def adjust_controller_frequency_menu():
             input(f"{freq} is an invalid frequency. Must be non-zero positive number. Press enter to continue.")
             continue
 
-        with lock:
-            frequency = freq
+        if all(isinstance(x, PIDController) for x in controllers):
+            with lock:
+                for controller in controllers:
+                    controller.freq = freq
         break
 
 
@@ -247,12 +195,16 @@ def main_menu():
                 "2- Adjust Kp, Kd, Ki\n" \
                 "3- Adjust thermistors setpoint\n" \
                 "4- Adjust controller frequency\n" \
-                "5- Exit".format("Enable" if not controller_enabled else "Disable")
+                "5- Exit".format("Enable" if not controllers_enabled else "Disable")
         opt: str = prompt_user_until_valid_input(msg, ["1", "2", "3", "4", "5"])
         match opt:
             case "1":
                 toggle_controller_menu()
             case "2":
+                if any(not isinstance(x, PIDController) for x in controllers):
+                    input("Controller is not PID. Press enter to continue.")
+                    continue
+
                 adjust_pid_ks_menu()
             case "3":
                 adjust_thermistors_setpoint_menu()
@@ -264,14 +216,6 @@ def main_menu():
 
 
 def processing():
-    # initialize controlers
-    pid_controllers: List[PidController] = [
-        PidController(pid_Kp, pid_Ki, pid_Kd),
-        PidController(pid_Kp, pid_Ki, pid_Kd),
-        PidController(pid_Kp, pid_Ki, pid_Kd),
-        PidController(pid_Kp, pid_Ki, pid_Kd)
-    ]
-
     clock: int = 0
     with open(INPUT_PIPE_PATH, 'r') as input_pipe:
         input_info_line: str = ""
@@ -313,32 +257,20 @@ def processing():
                     temp: float = float(temp_str)
                     thermistors.append(Thermistor(temp))
 
-                values: List[int] = [0, 0, 0, 0]
+                values: List[int] = []
 
-                use_bang_bang: bool = True
-                if use_bang_bang:
-                    values = bang_bang(thermistors, setpoint_value)
-                else:
-                    # use pids
-                    dt: float = 1.0 / frequency
-                    values = pids(pid_controllers, thermistors, dt)
+                for therm, controller in zip(thermistors, controllers):
+                    o: float = controller.process(therm.sensor_value)
+                    values.append(int(o))
 
                 with lock:
-                    if controller_enabled:
+                    if controllers_enabled:
                         write_to_output_pipe(values)
 
                 input_info_line = ""  # clear info line
                 clock += 1
             else:
                 input_info_line += input_data
-
-
-def pids(pid_controllers, thermistors, dt: float) -> List[int]:
-    result: List[int] = []
-    for therm, pid in zip(thermistors, pid_controllers):
-        pid_out = pid.calc_output(therm.sensor_value, setpoint_value, dt)
-        result.append(int(pid_out))
-    return result
 
 
 def handler(signum: int, frame):
