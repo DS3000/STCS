@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from typing import List
 import traceback
 import signal
+import threading
+from time import sleep
 
 input_pipe_path: str = "/tmp/temp_info_pipe"
 output_pipe_path: str = "/tmp/response_pipe"
@@ -22,6 +24,10 @@ d_tuning: float = 0.2
 
 freq: float = 5.0  # Hz
 dt: float = 1.0 / freq
+
+controller_enabled: bool = False
+
+lock: threading.Lock = threading.Lock()
 
 
 @dataclass
@@ -58,15 +64,17 @@ def heater_values_str(h1: int, h2: int, h3: int, h4: int) -> str:
     return "{};{};{};{}\0".format(h1, h2, h3, h4)
 
 
-def write_to_output_pipe(heater_values: List[int], verbose: bool = False):
+def write_to_output_pipe(heater_values: List[int]):
     with open(output_pipe_path, 'w') as pipe:
         data = heater_values_str(heater_values[0],
                                  heater_values[1],
                                  heater_values[2],
                                  heater_values[3])
-        if verbose:
-            print(f" Writing {data}")
         pipe.write(data)
+
+
+def turn_off_heaters():
+    write_to_output_pipe([0, 0, 0, 0])
 
 
 def bang_bang(in_thermister: List[Thermistor], setpoint: float,
@@ -82,10 +90,61 @@ def bang_bang(in_thermister: List[Thermistor], setpoint: float,
     return result
 
 
-def main():
-    print(f"Opening {input_pipe_path}... ", end="")
-    sys.stdout.flush()
+def toggle_controller_menu():
+    global controller_enabled
+    enabled: bool = False
+    with lock:
+        controller_enabled = not controller_enabled
+        enabled = controller_enabled
+    if not enabled:
+        turn_off_heaters()
 
+
+def adjust_pid_ks_menu():
+    pass
+
+
+def adjust_setpoint_menu():
+    pass
+
+
+def adjust_frequency_menu():
+    pass
+
+
+def main_menu():
+    want_to_quit: bool = False
+    while not want_to_quit:
+        valid_opt: bool = False
+        while not valid_opt:
+            msg: str = \
+                "1- {0} controller\n" \
+                "2- Adjust Kp, Kd, Ki\n" \
+                "3- Adjust thermistors setpoint\n" \
+                "4- Adjust frequency\n" \
+                "5- Exit".format("Enable" if not controller_enabled else "Disable")
+
+            opt: str = input(msg + "\n>")
+
+            match opt:
+                case "1":
+                    toggle_controller_menu()
+                case "2":
+                    adjust_pid_ks_menu()
+                case "3":
+                    adjust_setpoint_menu()
+                case "4":
+                    adjust_frequency_menu()
+                case "5":
+                    turn_off_heaters()
+                    want_to_quit = True
+                case _:
+                    input("Invalid Option. Press enter to contine...")
+                    continue
+            valid_opt = True
+
+
+def processing():
     pid_controllers: List[PidController] = [
         PidController(p_tuning, i_tuning, d_tuning),
         PidController(p_tuning, i_tuning, d_tuning),
@@ -95,23 +154,20 @@ def main():
 
     clock: int = 0
     with open(input_pipe_path, 'r') as input_pipe:
-        print("done!")
         input_info_line: str = ""
         while True:
             input_data: str = input_pipe.read(1)
 
             if len(input_data) == 0:
-                print("Pipe closed")
+                # pipe closed
                 break
 
             # read from the input stream until info line break (at info_line_terminator)
             if input_data[0] == info_line_terminator:
-
-                # print(f"{clock} Read: {input_info_line}", flush=True)
-
                 parts: List[str] = input_info_line.split(info_line_delimiter)
                 if len(parts) != 5:
                     continue
+
                 # parts format:
                 # <clock_timestamp>;<therm1_sensor_temp>-<therm1_temp_diff>;...\0
                 # notes:
@@ -123,8 +179,6 @@ def main():
 
                 read_therm_values: List[str] = [t1, t2, t3, t4]
                 thermistors: List[Thermistor] = []
-
-                print("received raw >", input_info_line)
 
                 # split each thermistor values, and append to thermistors list
                 for t in read_therm_values:
@@ -139,11 +193,6 @@ def main():
                     temp: float = float(temp_str)
                     thermistors.append(Thermistor(temp))
 
-                print(f"timestamp: {timestamp}")
-                for i, t in enumerate(thermistors):
-                    print("\t", i + 1, t)
-                print()
-
                 values: List[int] = [0, 0, 0, 0]
 
                 use_bang_bang: bool = True
@@ -153,7 +202,13 @@ def main():
                 else:
                     # use pids
                     values = pids(pid_controllers, thermistors)
-                write_to_output_pipe(values, verbose=True)
+
+                enabled: bool = False
+                with lock:
+                    enabled = controller_enabled
+
+                if enabled:
+                    write_to_output_pipe(values)
 
                 input_info_line = ""  # clear info line
                 clock += 1
@@ -170,9 +225,15 @@ def pids(pid_controllers, thermistors) -> List[int]:
 
 
 def handler(signum: int, frame):
-    print("Pressed Ctrl-C. Setting all heaters to 0 before exiting")
-    write_to_output_pipe([0, 0, 0, 0])
+    print("Pressed Ctrl-C. Turning off heaters before exiting")
+    turn_off_heaters()
     exit()
+
+
+def main():
+    process_thread: threading.Thread = threading.Thread(target=processing, daemon=True)
+    process_thread.start()
+    main_menu()
 
 
 if __name__ == '__main__':
@@ -184,5 +245,5 @@ if __name__ == '__main__':
         print(e)
         # fallback when an unhandled exception is thrown
         # set all heater values to zero
-        write_to_output_pipe([0, 0, 0, 0])
+        turn_off_heaters()
         exit()
