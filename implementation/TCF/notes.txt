@@ -1,2 +1,19 @@
-TODO: implement mode-switching controller, use that instead of either BangBang or PID controllers in the main function
+TODO extra: implement mode-switching controller, use that instead of either BangBang or PID controllers in the main function
+
+Q: how to implement frequency?
 Frequency is the realtime delta between controller read/write iterations; the clock number in the info line is irrelevant
+
+TCL spec requirements:
+-thermal control using PID (or bangbang controller)
+-let user adjust Kp Ki Kd before execution
+-let user define setpoint for each controller, with 0 as default
+ .at runtime, let user adjust the setpoint between -20 and 20, for each or all controllers
+-let user enable/disable thermal control
+ .upon being enabled, TCL should start reading temperature values from TSL and feed the TSL with heater power status according
+ to the controller(s) output
+ .upon being disabled, TCL should stop reading values from TSL, and turn off all heater power
+-at start, TCF shall acquire the power status of heaters 1 through 4
+-at every 5Hz, TCF shall acquire values of thermistors 1 through 4
+ .let user update frequency at runtime, between 1Hz and 5Hz
+-TCF shall operate heaters via TSL-provided interface based on the output from the PID controller
+ .shall operate heater power status, to mantain the temperature of each thermistor at the nominal value of 0 degrees Celsius
