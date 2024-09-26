@@ -1,11 +1,11 @@
 #!/usr/bin/python3
-import datetime
 
-from typing import List
-import traceback
-import signal
-import threading
 import os
+import threading
+import signal
+import traceback
+import datetime
+from typing import List
 
 from Thermistor import Thermistor
 from Controller import Controller
@@ -21,7 +21,11 @@ INFO_LINE_DELIMITER: str = ';'  # delimiter between values in a line
 SETPOINT_MAX_VALUE: float = 20.0
 SETPOINT_MIN_VALUE: float = -20.0
 INITIAL_SETPOINT_VALUE: float = 0.0
+
+MIN_FREQUENCY: float = 1.0
+MAX_FREQUENCY: float = 5.0
 INITIAL_FREQUENCY: float = 5.0  # Hz
+assert (MIN_FREQUENCY <= INITIAL_FREQUENCY <= MAX_FREQUENCY)
 
 INITIAL_PID_KP: float = 1.0
 INITIAL_PID_KI: float = 1.0
@@ -32,10 +36,10 @@ g_Kp: float = INITIAL_PID_KP
 g_Ki: float = INITIAL_PID_KI
 g_Kd: float = INITIAL_PID_KD
 
-controllers_enabled: bool = False
-lock: threading.Lock = threading.Lock()
+g_controllers_enabled: bool = False
+g_lock: threading.Lock = threading.Lock()
 
-controllers: List[BangBangController | PIDController] = [
+g_controllers: List[BangBangController | PIDController] = [
     # BangBangController(INITIAL_SETPOINT_VALUE),
     # BangBangController(INITIAL_SETPOINT_VALUE),
     # BangBangController(INITIAL_SETPOINT_VALUE),
@@ -71,9 +75,9 @@ def turn_off_heaters():
 
 
 def set_pid_ks(kp: float, ki: float, kd: float):
-    global controllers, g_Kp, g_Ki, g_Kd
+    global g_controllers, g_Kp, g_Ki, g_Kd
 
-    for controller in controllers:
+    for controller in g_controllers:
         controller.Kp = kp
         controller.Ki = ki
         controller.Kd = kd
@@ -83,7 +87,7 @@ def set_pid_ks(kp: float, ki: float, kd: float):
 
 
 def adjust_pid_ks_menu():
-    with lock:
+    with g_lock:
         msg: str = f"Current Kp {g_Kp}, Ki {g_Ki} Kd {g_Kd}\n\n" + \
                    "Enter three space-separated values (<Kp> <Ki> <Kd>), or empty string to go back\n"
 
@@ -99,10 +103,6 @@ def adjust_pid_ks_menu():
             input("Did not enter three comma-separated values. Press enter to continue.")
             continue
 
-        kp: float = 0.0
-        ki: float = 0.0
-        kp: float = 0.0
-
         try:
             kp = float(parts[0])
             ki = float(parts[1])
@@ -111,7 +111,7 @@ def adjust_pid_ks_menu():
             input(f"Could not parse entered line as 3 floats")
             continue
 
-        with lock:
+        with g_lock:
             set_pid_ks(kp, ki, kd)
         break
 
@@ -125,8 +125,8 @@ def set_controllers_setpoint(ctls: List[Controller], setpoint: float):
 
 
 def adjust_controllers_setpoint_menu():
-    with lock:
-        setpoints_str = "\n".join(f"Controller {i + 1} setpoint {x.setpoint}" for i, x in enumerate(controllers))
+    with g_lock:
+        setpoints_str = "\n".join(f"Controller {i + 1} setpoint {x.setpoint}" for i, x in enumerate(g_controllers))
         msg: str = setpoints_str + "\n\n" \
                                    "1- Adjust setpoint for all controllers\n" \
                                    "2- Adjust setpoint for specific controller\n" \
@@ -145,8 +145,8 @@ def adjust_controllers_setpoint_menu():
                     continue
 
                 try:
-                    with lock:
-                        set_controllers_setpoint(controllers, val_num)
+                    with g_lock:
+                        set_controllers_setpoint(g_controllers, val_num)
                         pass
                 except ValueError as e:
                     input(e)
@@ -178,8 +178,8 @@ def adjust_controllers_setpoint_menu():
                     continue
 
                 try:
-                    with lock:
-                        ctls = [controllers[controller_idx - 1]]
+                    with g_lock:
+                        ctls = [g_controllers[controller_idx - 1]]
                         set_controllers_setpoint(ctls, setpoint)
                 except ValueError as e:
                     input(e)
@@ -192,9 +192,9 @@ def adjust_controllers_setpoint_menu():
 
 def adjust_controller_frequency_menu():
     global g_frequency
-    with (lock):
+    with (g_lock):
         msg: str = f"Current frequency: {g_frequency} hz\n\n" + \
-                   "Enter the new controller frequency (in Hz), or empty string to go back"
+                   f"Enter the new controller frequency between {MIN_FREQUENCY} Hz and {MAX_FREQUENCY} Hz, or empty string to go back"
 
     while True:
         clear_console()
@@ -202,18 +202,19 @@ def adjust_controller_frequency_menu():
         if user_input == "":
             break
         try:
-            freq = int(user_input)
-        except ValueError as _:
-            input(f"Failed to convert {user_input} to integer. Press enter to continue.")
+            freq = float(user_input)
+        except ValueError:
+            input(f"Failed to convert {user_input} to float. Press enter to continue.")
             continue
 
-        if freq <= 0:
-            input(f"{freq} is an invalid frequency. Must be non-zero positive number. Press enter to continue.")
+        if not (MIN_FREQUENCY <= freq <= MAX_FREQUENCY):
+            input(
+                f"{freq} is an invalid frequency. Must be between {MIN_FREQUENCY} Hz and {MAX_FREQUENCY} Hz. Press enter to continue.")
             continue
 
-        with lock:
-            if all(isinstance(x, PIDController) for x in controllers):
-                for controller in controllers:
+        with g_lock:
+            if all(isinstance(x, PIDController) for x in g_controllers):
+                for controller in g_controllers:
                     controller.freq = freq
             g_frequency = freq
         break
@@ -248,29 +249,29 @@ def flush_old_data_in_pipe(pipe_path: str):
 
 
 def main_menu():
-    global controllers_enabled
+    global g_controllers_enabled
 
     want_to_quit: bool = False
     while not want_to_quit:
-        with lock:
+        with g_lock:
             msg: str = \
                 "1- {0} controller\n" \
                 "2- Adjust Kp, Kd, Ki\n" \
                 "3- Adjust controller setpoint\n" \
                 "4- Adjust controller frequency\n" \
-                "5- Exit".format("Enable" if not controllers_enabled else "Disable")
+                "5- Exit".format("Enable" if not g_controllers_enabled else "Disable")
         opt: str = prompt_user_until_valid_input(msg, ["1", "2", "3", "4", "5"])
         match opt:
             case "1":
-                with lock:
-                    controllers_enabled = not controllers_enabled
-                    if not controllers_enabled:
+                with g_lock:
+                    g_controllers_enabled = not g_controllers_enabled
+                    if not g_controllers_enabled:
                         turn_off_heaters()
                     else:
                         flush_old_data_in_pipe(INPUT_PIPE_PATH)
             case "2":
-                with lock:
-                    if any(not isinstance(x, PIDController) for x in controllers):
+                with g_lock:
+                    if any(not isinstance(x, PIDController) for x in g_controllers):
                         input("Controller is not PID. Press enter to continue.")
                         continue
 
@@ -286,14 +287,14 @@ def main_menu():
 
 def processing():
     while True:
-        with lock:
-            if not controllers_enabled:
+        with g_lock:
+            if not g_controllers_enabled:
                 # skip reading from input pipe and writing to output pipe
                 continue
 
         prev_time = datetime.datetime.now()
         time_acc_usec: int = 0
-        with lock:
+        with g_lock:
             target_dt_microsecs = int(1.0 / g_frequency * 1_000_000)
 
         iteration: int = 0
@@ -346,10 +347,10 @@ def processing():
                         therm_temp: float = float(therm_temp_str)
                         thermistors.append(Thermistor(therm_temp))
 
-                    with lock:
+                    with g_lock:
                         output_heater_values: List[int] = []
 
-                        for therm, controller in zip(thermistors, controllers):
+                        for therm, controller in zip(thermistors, g_controllers):
                             controller_output: float = controller.process(therm.sensor_value)
                             output_heater_values.append(int(controller_output))
 
@@ -357,8 +358,8 @@ def processing():
 
                     break
                 time_acc_usec = 0
-                with lock:
-                    if not controllers_enabled:
+                with g_lock:
+                    if not g_controllers_enabled:
                         break
 
 
