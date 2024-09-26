@@ -1,0 +1,2 @@
+TODO: implement mode-switching controller, use that instead of either BangBang or PID controllers in the main function
+Frequency is the realtime delta between controller read/write iterations; the clock number in the info line is irrelevant

@@ -25,4 +25,7 @@ class PIDController(Controller):
                          self.Ki * self.integral +
                          self.Kd * d_factor)
         self.previous_error = error_factor
-        return result
+
+        if result > 0.0:
+            return 1.0
+        return 0.0
