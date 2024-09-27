@@ -1,4 +1,4 @@
-TODO extra: implement mode-switching controller, use that instead of either BangBang or PID controllers in the main function
+TODO: terminate the program in the event that the input pipe is closed
 
 Q: how to implement frequency?
 Frequency is the realtime delta between controller read/write iterations; the clock number in the info line is irrelevant
