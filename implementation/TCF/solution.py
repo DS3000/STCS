@@ -308,10 +308,10 @@ def main_menu():
                     elif g_controller_mode == ControllerMode.PID:
                         g_controller_mode = ControllerMode.BangBang
 
-                    for controller in controllers:
-                        g_controllers.append(
-                            BangBangController(controller.setpoint),
-                        )
+                        for controller in controllers:
+                            g_controllers.append(
+                                BangBangController(controller.setpoint),
+                            )
 
             case "6":
                 turn_off_heaters()
