@@ -6,6 +6,7 @@ import signal
 import traceback
 import datetime
 from typing import List
+from enum import Enum
 
 from Thermistor import Thermistor
 from Controller import Controller
@@ -39,17 +40,26 @@ g_Kd: float = INITIAL_PID_KD
 g_controllers_enabled: bool = False
 g_lock: threading.Lock = threading.Lock()
 
-g_controllers: List[BangBangController | PIDController] = [
-    # BangBangController(INITIAL_SETPOINT_VALUE),
-    # BangBangController(INITIAL_SETPOINT_VALUE),
-    # BangBangController(INITIAL_SETPOINT_VALUE),
-    # BangBangController(INITIAL_SETPOINT_VALUE),
 
-    PIDController(INITIAL_SETPOINT_VALUE, INITIAL_PID_KP, INITIAL_PID_KI, INITIAL_PID_KD, INITIAL_FREQUENCY),
-    PIDController(INITIAL_SETPOINT_VALUE, INITIAL_PID_KP, INITIAL_PID_KI, INITIAL_PID_KD, INITIAL_FREQUENCY),
-    PIDController(INITIAL_SETPOINT_VALUE, INITIAL_PID_KP, INITIAL_PID_KI, INITIAL_PID_KD, INITIAL_FREQUENCY),
-    PIDController(INITIAL_SETPOINT_VALUE, INITIAL_PID_KP, INITIAL_PID_KI, INITIAL_PID_KD, INITIAL_FREQUENCY),
-]
+class ControllerMode(Enum):
+    BangBang = 1
+    PID = 2
+
+
+g_controller_mode: ControllerMode = ControllerMode.BangBang
+g_controllers: List[BangBangController | PIDController] = []
+
+match g_controller_mode:
+    case ControllerMode.BangBang:
+        for _ in range(4):
+            g_controllers.append(
+                BangBangController(INITIAL_SETPOINT_VALUE)
+            )
+    case ControllerMode.PID:
+        for _ in range(4):
+            g_controllers.append(
+                PIDController(INITIAL_SETPOINT_VALUE, INITIAL_PID_KP, INITIAL_PID_KI, INITIAL_PID_KD, INITIAL_FREQUENCY)
+            )
 
 
 def clear_console():
@@ -249,18 +259,20 @@ def flush_old_data_in_pipe(pipe_path: str):
 
 
 def main_menu():
-    global g_controllers_enabled
+    global g_controllers_enabled, g_controller_mode, g_controllers
 
     want_to_quit: bool = False
     while not want_to_quit:
         with g_lock:
             msg: str = \
-                "1- {0} controller\n" \
+                "1- {0} controller\n".format("Enable" if not g_controllers_enabled else "Disable") + \
                 "2- Adjust Kp, Kd, Ki\n" \
                 "3- Adjust controller setpoint\n" \
                 "4- Adjust controller frequency\n" \
-                "5- Exit".format("Enable" if not g_controllers_enabled else "Disable")
-        opt: str = prompt_user_until_valid_input(msg, ["1", "2", "3", "4", "5"])
+                "5- Set controller mode to {0}\n".format(
+                    "PID" if g_controller_mode == ControllerMode.BangBang else "BangBang") + \
+                "6- Exit"
+        opt: str = prompt_user_until_valid_input(msg, ["1", "2", "3", "4", "5", "6"])
         match opt:
             case "1":
                 with g_lock:
@@ -281,6 +293,27 @@ def main_menu():
             case "4":
                 adjust_controller_frequency_menu()
             case "5":
+                with g_lock:
+                    controllers: List[Controller] = [x for x in g_controllers]
+                    g_controllers.clear()
+
+                    if g_controller_mode == ControllerMode.BangBang:
+                        g_controller_mode = ControllerMode.PID
+
+                        for controller in controllers:
+                            g_controllers.append(
+                                PIDController(controller.setpoint, g_Kp, g_Ki, g_Kd, g_frequency),
+                            )
+
+                    elif g_controller_mode == ControllerMode.PID:
+                        g_controller_mode = ControllerMode.BangBang
+
+                    for controller in controllers:
+                        g_controllers.append(
+                            BangBangController(controller.setpoint),
+                        )
+
+            case "6":
                 turn_off_heaters()
                 want_to_quit = True
 
